@@ -1,0 +1,7 @@
+# infra/kafka/console-config.yaml
+# Redpanda Console configuration for local development
+# Docs: https://github.com/redpanda-data/console
+
+kafka:
+  brokers:
+    - kafka:9092

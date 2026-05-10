@@ -1,0 +1,9 @@
+# Hash Worker dependencies — flat file for Docker builds
+# Keep in sync with pyproject.toml
+confluent-kafka==2.4.0
+tree-sitter==0.22.0
+tree-sitter-cpp==0.22.0
+minio==7.2.7
+redis==5.0.4
+datasketch==1.6.5
+httpx==0.27.0

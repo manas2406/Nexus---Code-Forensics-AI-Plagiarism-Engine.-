@@ -191,6 +191,100 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-nexus-secret-change-in-prod}
     restart: "no"
 
+  # ── Redpanda Console (Kafka UI) ─────────────────────────────────────────────
+  # Access at: http://localhost:8080
+  # Browse topics, inspect message payloads, monitor consumer group lag.
+  # Only starts with: docker compose --profile dev up
+  kafka-ui:
+    image: redpandadata/console:v2.6.0
+    container_name: nexus-kafka-ui
+    hostname: kafka-ui
+    networks: [nexus-net]
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      CONFIG_FILEPATH: /etc/console/config.yaml
+    volumes:
+      - ./infra/kafka/console-config.yaml:/etc/console/config.yaml:ro
+    restart: unless-stopped
+    profiles: [dev]
+
+  # ── Redis Commander ──────────────────────────────────────────────────────────
+  # Access at: http://localhost:8081
+  # Browse keys, inspect job status hashes, watch Pub/Sub events.
+  # Only starts with: docker compose --profile dev up
+  redis-ui:
+    image: rediscommander/redis-commander:latest
+    container_name: nexus-redis-ui
+    hostname: redis-ui
+    networks: [nexus-net]
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOSTS: "nexus-redis:redis:6379"
+    restart: unless-stopped
+    profiles: [dev]
+
+  # ── Hash Worker ──────────────────────────────────────────────────────────────
+  # ACTIVATE IN PHASE 2 — uncomment when services/hash-worker/src/main.py exists
+  #
+  # hash-worker:
+  #   build:
+  #     context: services/hash-worker
+  #     dockerfile: Dockerfile
+  #     target: runtime
+  #   container_name: nexus-hash-worker
+  #   hostname: hash-worker
+  #   networks: [nexus-net]
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     minio:
+  #       condition: service_healthy
+  #   environment:
+  #     <<: *infra-env
+  #     WINNOW_K: ${WINNOW_K:-8}
+  #     WINNOW_W: ${WINNOW_W:-6}
+  #     MAX_FILE_SIZE_BYTES: ${MAX_FILE_SIZE_BYTES:-512000}
+  #     LOG_LEVEL: ${LOG_LEVEL:-info}
+  #   restart: unless-stopped
+
+  # ── AI Worker ────────────────────────────────────────────────────────────────
+  # ACTIVATE IN PHASE 4 — uncomment when services/ai-worker/src/main.py exists
+  #
+  # ai-worker:
+  #   build:
+  #     context: services/ai-worker
+  #     dockerfile: Dockerfile
+  #     target: runtime
+  #   container_name: nexus-ai-worker
+  #   hostname: ai-worker
+  #   networks: [nexus-net]
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     minio:
+  #       condition: service_healthy
+  #   environment:
+  #     <<: *infra-env
+  #     LLM_API_KEY: ${LLM_API_KEY}
+  #     LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
+  #     LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+  #     LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-5}
+  #     LLM_MAX_SOURCE_CHARS: ${LLM_MAX_SOURCE_CHARS:-4000}
+  #     LOG_LEVEL: ${LOG_LEVEL:-info}
+  #   restart: unless-stopped
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Networks
 # ─────────────────────────────────────────────────────────────────────────────
