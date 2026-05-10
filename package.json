@@ -1,12 +1,21 @@
 {
   "name": "nexus",
+  "version": "0.0.1",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
   "scripts": {
-    "dev": "pnpm --filter api-gateway dev",
-    "typecheck": "pnpm --filter api-gateway typecheck",
-    "lint": "pnpm --filter api-gateway lint"
+    "dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up",
+    "infra:up": "docker compose up kafka zookeeper minio redis --wait",
+    "infra:down": "docker compose down -v",
+    "infra:reset": "docker compose down -v && docker compose up kafka zookeeper minio redis --wait",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
   }
 }

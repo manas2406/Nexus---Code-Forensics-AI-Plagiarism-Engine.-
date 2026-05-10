@@ -1,91 +1,138 @@
+# docker-compose.yml
+#
+# Nexus Infrastructure — Phase 0
+# Only infra services. App services (api-gateway, hash-worker, ai-worker, frontend)
+# are added in later phases.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared environment snippets via YAML anchors.
+# These are referenced by app services added in later phases.
+# ─────────────────────────────────────────────────────────────────────────────
+x-infra-env: &infra-env
+  KAFKA_BROKERS: kafka:9092
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  MINIO_ENDPOINT: minio
+  MINIO_PORT: "9000"
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-nexus}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-nexus-secret-change-in-prod}
+  MINIO_USE_SSL: "false"
+  MINIO_BUCKET_SUBMISSIONS: ${MINIO_BUCKET_SUBMISSIONS:-nexus-submissions}
+  MINIO_BUCKET_REPORTS: ${MINIO_BUCKET_REPORTS:-nexus-reports}
+
 services:
-  # ─── Zookeeper ──────────────────────────────────────────────────────
+
+  # ── Zookeeper ───────────────────────────────────────────────────────────────
+  # Required by Kafka (KRaft mode alternative requires Kafka 3.5+ — staying on
+  # Zookeeper for broader compatibility with team's existing tooling).
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: nexus-zookeeper
+    hostname: zookeeper
+    networks: [nexus-net]
     ports:
       - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      test: echo stat | nc localhost 2181 | grep Mode
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 15s
+    restart: unless-stopped
 
-  # ─── Kafka ──────────────────────────────────────────────────────────
+  # ── Kafka ───────────────────────────────────────────────────────────────────
   kafka:
-    image: confluentinc/cp-kafka:7.6.0
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: nexus-kafka
+    hostname: kafka
+    networks: [nexus-net]
     ports:
-      - "9092:9092"
-      - "29092:29092"
+      - "9092:9092"      # Internal broker (used by all containers)
+      - "9093:9093"      # External broker (used by host-machine tooling like kafkacat)
     depends_on:
       zookeeper:
         condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
-      interval: 10s
-      timeout: 10s
-      retries: 5
 
-  # ─── Kafka Init (run once) ─────────────────────────────────────────
+      # Two listener configs:
+      # PLAINTEXT → internal container-to-container communication
+      # EXTERNAL → host machine → container (for local debugging with kafka CLI)
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+
+      # ── CRITICAL for fault tolerance ─────────────────────────────────────
+      # 7-day log retention — ensures Kafka replays messages if a worker crashes
+      # and stays down for hours/days. Without this, messages expire and forensic
+      # jobs are silently dropped. Never use the default (168h keeps this explicit).
+      KAFKA_LOG_RETENTION_HOURS: 168
+
+      # 10MB max message size — students can submit large C++ files.
+      # Must be set on BOTH broker AND producer/consumer (already set in kafka_client.py).
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+      KAFKA_MAX_REQUEST_SIZE: 10485760
+
+      # Disable auto topic creation — all topics are explicitly created by init-topics.sh.
+      # This prevents typos in topic names from silently creating phantom topics.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # Performance tuning
+      KAFKA_NUM_PARTITIONS: 1          # Default; init-topics.sh overrides per topic
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824   # 1GB segments
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: 300000
+
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # Try to list topics — proves broker is up and ZK connection is live
+      test: kafka-topics --bootstrap-server localhost:9092 --list
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Kafka Init ──────────────────────────────────────────────────────────────
+  # One-shot container that creates topics after Kafka is healthy.
+  # Uses `restart: no` so it doesn't loop. If topic creation fails,
+  # check `docker compose logs kafka-init`.
   kafka-init:
-    image: confluentinc/cp-kafka:7.6.0
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: nexus-kafka-init
+    networks: [nexus-net]
     depends_on:
       kafka:
         condition: service_healthy
-    restart: on-failure
     volumes:
       - ./infra/kafka/init-topics.sh:/init-topics.sh:ro
-    entrypoint: ["/bin/bash", "/init-topics.sh"]
-
-  # ─── MinIO ─────────────────────────────────────────────────────────
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    command: server /data --console-address :9001
+    command: bash /init-topics.sh
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - minio-data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      KAFKA_BROKER: kafka:9092
+    restart: "no"
 
-  # ─── MinIO Init (run once) ─────────────────────────────────────────
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    restart: on-failure
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set nexus http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
-      mc mb --ignore-existing nexus/nexus-submissions;
-      mc mb --ignore-existing nexus/nexus-reports;
-      echo '[minio-init] Buckets ready.';
-      "
-
-  # ─── Redis ─────────────────────────────────────────────────────────
+  # ── Redis ───────────────────────────────────────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:7.2-alpine
+    container_name: nexus-redis
+    hostname: redis
+    networks: [nexus-net]
     ports:
       - "6379:6379"
     command: redis-server /usr/local/etc/redis/redis.conf
@@ -93,12 +140,79 @@ services:
       - redis-data:/data
       - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: redis-cli ping | grep PONG
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── MinIO ───────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-06-04T19-20-08Z
+    container_name: nexus-minio
+    hostname: minio
+    networks: [nexus-net]
+    ports:
+      - "9000:9000"      # S3-compatible API
+      - "9001:9001"      # MinIO Web Console (browse at http://localhost:9001)
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-nexus}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-nexus-secret-change-in-prod}
+      # Optional: telemetry off for air-gapped environments
+      MINIO_UPDATE: "off"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: mc ready local
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
+  # ── MinIO Init ──────────────────────────────────────────────────────────────
+  minio-init:
+    image: minio/mc:RELEASE.2024-06-03T11-52-49Z
+    container_name: nexus-minio-init
+    networks: [nexus-net]
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./infra/minio/init-buckets.sh:/init-buckets.sh:ro
+    entrypoint: sh /init-buckets.sh
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-nexus}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-nexus-secret-change-in-prod}
+    restart: "no"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Networks
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  nexus-net:
+    driver: bridge
+    # Explicit subnet avoids conflicts with VPN ranges
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named Volumes
+# Never use bind mounts for stateful data — named volumes survive container
+# recreation and are managed by Docker's storage driver.
+# ─────────────────────────────────────────────────────────────────────────────
 volumes:
   zookeeper-data:
-  minio-data:
+    driver: local
+  zookeeper-logs:
+    driver: local
+  kafka-data:
+    driver: local
   redis-data:
+    driver: local
+  minio-data:
+    driver: local

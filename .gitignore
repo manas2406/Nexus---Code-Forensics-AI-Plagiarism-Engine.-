@@ -1,15 +1,40 @@
-# Dependencies
+# .gitignore
+
+# Node
 node_modules/
+dist/
+.next/
+.turbo/
 .pnpm-store/
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
 
 # Environment
 .env
+.env.local
+.env.*.local
 
-# Build outputs
-dist/
-.next/
+# Docker volumes (never commit data dirs)
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.tsbuildinfo
+
+# Project-specific
+Buildplan.md

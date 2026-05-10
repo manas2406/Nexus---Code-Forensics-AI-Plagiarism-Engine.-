@@ -1,0 +1,26 @@
+# docker-compose.dev.yml
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# This file:
+# - Adds hot-reload volume mounts for app services (added in Phase 3+)
+# - Exposes extra debug ports
+# - Sets LOG_LEVEL=debug globally
+
+services:
+  kafka:
+    environment:
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN      # Reduce Kafka noise in dev
+
+  # When app services are added in Phase 3+, add their dev overrides here:
+  # api-gateway:
+  #   volumes:
+  #     - ./services/api-gateway/src:/app/src:ro
+  #   environment:
+  #     LOG_LEVEL: debug
+  #     NODE_ENV: development
+  #
+  # hash-worker:
+  #   volumes:
+  #     - ./services/hash-worker/src:/app/src:ro
+  #   environment:
+  #     LOG_LEVEL: debug
