@@ -1,0 +1,18 @@
+[project]
+name = "nexus-hash-worker"
+version = "0.1.0"
+description = "AST-based code fingerprinting worker using Tree-sitter and MinHash"
+requires-python = ">=3.11"
+dependencies = [
+    "tree-sitter>=0.21.0",
+    "tree-sitter-cpp>=0.21.0",
+    "datasketch>=1.6.0",
+    "kafka-python>=2.0.2",
+    "minio>=7.2.0",
+    "redis>=5.0.0",
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

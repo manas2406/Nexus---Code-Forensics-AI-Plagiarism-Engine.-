@@ -1,0 +1,12 @@
+{
+  "name": "nexus",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter api-gateway dev",
+    "typecheck": "pnpm --filter api-gateway typecheck",
+    "lint": "pnpm --filter api-gateway lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
