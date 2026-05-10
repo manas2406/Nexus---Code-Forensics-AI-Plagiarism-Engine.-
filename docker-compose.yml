@@ -174,7 +174,7 @@ services:
 
   # ── MinIO Init ──────────────────────────────────────────────────────────────
   minio-init:
-    image: minio/mc:RELEASE.2024-06-03T11-52-49Z
+    image: minio/mc:latest
     container_name: nexus-minio-init
     networks: [nexus-net]
     depends_on:
