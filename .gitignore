@@ -6,6 +6,7 @@ dist/
 .next/
 .turbo/
 .pnpm-store/
+.venv/
 
 # Python
 __pycache__/
