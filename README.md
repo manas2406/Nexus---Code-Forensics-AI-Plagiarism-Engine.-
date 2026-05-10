@@ -14,3 +14,9 @@ docker compose up -d
 # 3. Install Node.js dependencies
 pnpm install
 ```
+
+## Phase 0 baseline
+- Perf: 0.2ms per file (100 synthetic files)
+- Infra: all 5 services healthy on `docker compose up`
+- Tests: 6/6 algorithm tests passing
+- Checkpoint 0: complete
