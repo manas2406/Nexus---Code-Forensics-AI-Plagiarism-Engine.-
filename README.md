@@ -1,56 +1,188 @@
-# Nexus — Code Forensics & AI Plagiarism Engine
+# Nexus
 
-Nexus is an event-driven code-plagiarism detection platform that ingests student submissions, fingerprints source files using Tree-sitter AST hashing and MinHash (Jaccard) similarity, and escalates suspicious pairs to an LLM-powered forensic analyser that identifies obfuscation techniques and renders a verdict. The system is built as a polyglot monorepo with a Next.js frontend, an Express API gateway, Python worker microservices, and infrastructure powered by Kafka, MinIO, and Redis.
+Distributed plagiarism detection system for C++ code submissions.
 
-## Quick Start
+[Python 3.11] | [Node 20] | [TypeScript] | [Kafka] | [MinIO] | [Redis] | [License: MIT]
 
+## How it works
+
+Nexus is a distributed plagiarism detection system that receives ZIP archives of C++ files, parses them into AST token sequences to compute MinHash fingerprints, pre-filters similarities with LSH, and verifies exact Jaccard scores. The most suspicious code pairs are then routed to an LLM for forensic obfuscation analysis before the final report is surfaced to the frontend.
+
+```mermaid
+graph LR
+    A[ZIP upload] --> B[api-gateway]
+    B --> C[MinIO]
+    B --> D[Kafka]
+    D --> E[hash-worker]
+    E --> F[suspicious-pairs topic]
+    F --> G[ai-worker]
+    G --> H[forensic report]
+    H --> I[frontend]
+```
+
+```text
+ZIP upload → api-gateway → MinIO → Kafka → hash-worker → suspicious-pairs topic → ai-worker → forensic report → frontend
+```
+
+## Prerequisites
+
+- git: `git --version`
+- node >= 20: `node --version`
+- pnpm >= 9: `pnpm --version`
+- python 3.11: `python3.11 --version`
+- docker: `docker --version`
+- docker compose v2: `docker compose version`
+
+## Quick start
+
+1. Clone the repo
 ```bash
-# 1. Copy environment variables
+git clone <repo-url>
+```
+2. `cp .env.example .env` and fill in OPENAI_API_KEY
+```bash
 cp .env.example .env
-
-# 2. Start all infrastructure services
+```
+3. `docker compose up -d`
+```bash
 docker compose up -d
-
-# 3. Install Node.js dependencies
+```
+4. Verify all services healthy: `docker compose ps`
+```bash
+docker compose ps
+```
+5. `pnpm install`
+```bash
 pnpm install
+```
+6. `cd services/hash-worker && pip install -e ".[dev]"`
+```bash
+cd services/hash-worker && pip install -e ".[dev]"
+```
+7. `cd services/ai-worker && pip install -e ".[dev]"`
+```bash
+cd services/ai-worker && pip install -e ".[dev]"
+```
+8. Start the api-gateway: `pnpm dev`
+```bash
+pnpm dev
+```
+9. Open http://localhost:3000
 
-# 4. (Optional) Start with developer UI tools
-make dev-up
+## Environment variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| KAFKA_BROKER | Yes | kafka:9092 | Kafka broker address |
+| MINIO_ENDPOINT | Yes | minio:9000 | MinIO server address |
+| MINIO_ROOT_USER | Yes | nexus | MinIO access key |
+| MINIO_ROOT_PASSWORD | Yes | nexus-secret-change-in-prod | MinIO secret key |
+| REDIS_URL | Yes | redis://localhost:6379 | Redis connection string |
+| OPENAI_API_KEY | Yes | None | OpenAI API key for AI analysis |
+| LLM_MAX_CONCURRENT | No | 5 | Max concurrent LLM requests |
+| SUSPICIOUS_PAIR_THRESHOLD | No | 0.6 | Exact Jaccard similarity threshold |
+| LSH_THRESHOLD | No | 0.5 | LSH pre-filter similarity threshold |
+| LSH_NUM_PERM | No | 128 | Number of MinHash permutations |
+| MAX_FILE_BYTES | No | 500000 | Maximum bytes per file to process |
+
+## Project structure
+
+```text
+nexus/
+├── apps/web/              # Next.js frontend
+├── services/
+│   ├── api-gateway/       # GraphQL API, Kafka producer, MinIO upload
+│   ├── hash-worker/       # AST extraction, fingerprinting, LSH comparison
+│   └── ai-worker/         # LLM forensic analysis, report storage
+├── shared/types/          # Shared TypeScript event types
+└── infra/                 # Kafka, MinIO, Redis init scripts
 ```
 
-## Developer Tooling
-
-| Tool | URL | Purpose |
-|------|-----|---------|
-| **Kafka UI** (Redpanda Console) | http://localhost:8080 | Browse topics, inspect messages, monitor consumer lag |
-| **Redis Commander** | http://localhost:8081 | Browse keys, inspect job status hashes |
-| **MinIO Console** | http://localhost:9001 | Browse buckets, manage objects (user: `nexus`) |
-
-Start with `make dev-up` or `docker compose --profile dev up`.
-
-## Useful Commands
+## Running the workers manually
 
 ```bash
-make help              # List all available commands
-make infra-validate    # Run full infrastructure validation (21+ checks)
-make kafka-topics      # List all Kafka topics with partition details
-make worker-build      # Build hash-worker and ai-worker Docker images
-make test-unit         # Run unit tests (no Docker required)
-make test-integration  # Run integration tests (requires infra-up)
+# hash-worker — process a ZIP directly
+cd services/hash-worker
+python main.py --zip nexus-submissions/test.zip --job-id debug-001
+
+# ai-worker — process a suspicious pair directly
+cd services/ai-worker
+python main.py --pair-id <pair-id> --job-id debug-001
 ```
 
-## Project Status
+## Running tests
 
-### Phase 0 — Complete ✅
-- Perf: 0.2ms per file (100 synthetic files)
-- Infra: all 5 services healthy on `docker compose up`
-- Tests: 6/6 algorithm tests passing
+```bash
+# Algorithm unit tests (no infra needed)
+cd services/hash-worker
+pytest test_algo.py test_phase1.py -v
 
-### Phase 1 — Complete ✅
-- Infrastructure validation: 21+ automated checks (`make infra-validate`)
-- Developer observability: Kafka UI + Redis UI via `make dev-up`
-- Python environment: `pyproject.toml` with pinned deps + dev tools
-- Worker Dockerfiles: multi-stage builds (hash-worker ~552MB, ai-worker ~253MB)
-- Algorithm pipeline: batch processing, LSH pre-filter, benchmark (N=500)
-- Schema contract: `shared/types/index.ts` with MINIO_PATHS, CONSUMER_GROUPS
-- Test fixtures: `conftest.py` with MinIO + Redis + ZIP factory fixtures
+# Integration tests (requires docker compose up)
+pytest test_phase2.py -m integration -v
+
+# TypeScript typecheck
+pnpm typecheck
+```
+
+## Job state machine
+
+```mermaid
+graph TD
+    PENDING --> EXTRACTING
+    EXTRACTING --> PARSING
+    PARSING --> HASHING
+    HASHING --> COMPARING
+    COMPARING --> AI_ANALYSIS
+    AI_ANALYSIS --> COMPLETE
+    PENDING --> FAILED
+    EXTRACTING --> FAILED
+    PARSING --> FAILED
+    HASHING --> FAILED
+    COMPARING --> FAILED
+    AI_ANALYSIS --> FAILED
+```
+
+```text
+PENDING → EXTRACTING → PARSING → HASHING → COMPARING → AI_ANALYSIS → COMPLETE
+                                                                    ↘ FAILED
+```
+
+| State | Set by | Meaning |
+|---|---|---|
+| PENDING | api-gateway | Job created and enqueued |
+| EXTRACTING | hash-worker | Unzipping files from MinIO |
+| PARSING | hash-worker | Extracting AST tokens |
+| HASHING | hash-worker | Computing LSH fingerprints |
+| COMPARING | hash-worker | Running Jaccard comparisons |
+| AI_ANALYSIS | ai-worker | LLM analyzing suspicious pairs |
+| COMPLETE | ai-worker | Report generated and saved |
+| FAILED | Any | Unrecoverable error occurred |
+
+## Kafka topics
+
+| Topic | Producer | Consumer | Purpose |
+|---|---|---|---|
+| submissions | api-gateway | hash-worker | New ZIP uploaded |
+| job-status | hash-worker, ai-worker | api-gateway | Real-time state updates |
+| suspicious-pairs | hash-worker | ai-worker | Pairs needing AI analysis |
+| results | ai-worker | api-gateway | Final forensic reports |
+| dlq | Any | None | Dead letter queue for failed messages |
+
+## Phase 0 baseline
+
+| Metric | Result |
+|---|---|
+| Files processed | 100 synthetic |
+| Avg per file | 0.2ms |
+| Algorithm tests | 6/6 passing |
+| Infra startup | all healthy |
+
+## Contributing
+
+- Branch naming: phase-{n}-{dev-a|dev-b} or integration/phase-{n}
+- Every PR must pass pnpm typecheck and pytest test_algo.py -v before review
+- Cross-review required before merge — Dev A reviews Dev B's code and vice versa
+
+## License
+
+MIT
