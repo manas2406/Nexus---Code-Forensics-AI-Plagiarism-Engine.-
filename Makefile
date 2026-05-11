@@ -164,7 +164,7 @@ hash-shell:
 	  -e MINIO_ENDPOINT=minio:9000 \
 	  -e MINIO_ACCESS_KEY=nexus \
 	  -e MINIO_SECRET_KEY=nexus-secret-change-in-prod \
-	  -v "$(CURDIR)/services/hash-worker/src:/app/src:ro" \
+	  -v "$(CURDIR)/services/hash-worker:/app:ro" \
 	  nexus-hash-worker:dev \
 	  bash
 

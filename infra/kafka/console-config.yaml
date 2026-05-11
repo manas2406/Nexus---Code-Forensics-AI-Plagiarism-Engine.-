@@ -4,4 +4,4 @@
 
 kafka:
   brokers:
-    - kafka:909:2
+    - kafka:9092

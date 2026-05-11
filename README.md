@@ -13,10 +13,44 @@ docker compose up -d
 
 # 3. Install Node.js dependencies
 pnpm install
+
+# 4. (Optional) Start with developer UI tools
+make dev-up
 ```
 
-## Phase 0 baseline
+## Developer Tooling
+
+| Tool | URL | Purpose |
+|------|-----|---------|
+| **Kafka UI** (Redpanda Console) | http://localhost:8080 | Browse topics, inspect messages, monitor consumer lag |
+| **Redis Commander** | http://localhost:8081 | Browse keys, inspect job status hashes |
+| **MinIO Console** | http://localhost:9001 | Browse buckets, manage objects (user: `nexus`) |
+
+Start with `make dev-up` or `docker compose --profile dev up`.
+
+## Useful Commands
+
+```bash
+make help              # List all available commands
+make infra-validate    # Run full infrastructure validation (21+ checks)
+make kafka-topics      # List all Kafka topics with partition details
+make worker-build      # Build hash-worker and ai-worker Docker images
+make test-unit         # Run unit tests (no Docker required)
+make test-integration  # Run integration tests (requires infra-up)
+```
+
+## Project Status
+
+### Phase 0 — Complete ✅
 - Perf: 0.2ms per file (100 synthetic files)
 - Infra: all 5 services healthy on `docker compose up`
 - Tests: 6/6 algorithm tests passing
-- Checkpoint 0: complete
+
+### Phase 1 — Complete ✅
+- Infrastructure validation: 21+ automated checks (`make infra-validate`)
+- Developer observability: Kafka UI + Redis UI via `make dev-up`
+- Python environment: `pyproject.toml` with pinned deps + dev tools
+- Worker Dockerfiles: multi-stage builds (hash-worker ~552MB, ai-worker ~253MB)
+- Algorithm pipeline: batch processing, LSH pre-filter, benchmark (N=500)
+- Schema contract: `shared/types/index.ts` with MINIO_PATHS, CONSUMER_GROUPS
+- Test fixtures: `conftest.py` with MinIO + Redis + ZIP factory fixtures

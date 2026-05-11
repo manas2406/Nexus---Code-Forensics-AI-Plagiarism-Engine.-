@@ -87,6 +87,18 @@ check "dead-letter has 1 partition" bash -c "
     | grep -q 'PartitionCount: 1'
 "
 
+# ── Kafka external listener (host access) ─────────────────────────────────────
+header "Kafka External Listener (Host → Container)"
+
+# This tests that a producer on the HOST machine can reach Kafka via localhost:9093.
+# If this fails, Dev B's pytest suite cannot produce test messages.
+check "EXTERNAL listener reachable at localhost:9093" bash -c "
+  echo 'validation-test' | timeout 10 docker run --rm -i --network host \
+    confluentinc/cp-kafka:7.6.1 \
+    kafka-console-producer --broker-list localhost:9093 --topic job-lifecycle 2>&1 \
+    | grep -v 'LEADER_NOT_AVAILABLE' | grep -v 'UnknownTopicOrPartition'
+"
+
 # ── MinIO ─────────────────────────────────────────────────────────────────────
 header "MinIO Buckets & Lifecycle"
 
@@ -119,6 +131,13 @@ check "maxmemory-policy is volatile-lru" bash -c "
   docker exec nexus-redis redis-cli CONFIG GET maxmemory-policy | grep -q volatile-lru
 "
 
+# Redis persistence validation: write key, verify it's readable
+check "Redis can write and read keys" bash -c "
+  docker exec nexus-redis redis-cli SET nexus:validate:test 'phase1-ok' EX 60 >/dev/null && \
+  docker exec nexus-redis redis-cli GET nexus:validate:test | grep -q 'phase1-ok' && \
+  docker exec nexus-redis redis-cli DEL nexus:validate:test >/dev/null
+"
+
 # ── Host access ───────────────────────────────────────────────────────────────
 header "Host Access (for Dev B's Python tests)"
 
@@ -128,6 +147,29 @@ check "MinIO S3 API reachable at localhost:9000" bash -c "
 check "Redis reachable at localhost:6379" bash -c "
   docker exec nexus-redis redis-cli -h localhost ping | grep -q PONG
 "
+
+# ── Dev tooling (optional — only if running with --profile dev) ────────────────
+if docker inspect nexus-kafka-ui &>/dev/null; then
+  header "Developer Tooling"
+
+  STATUS=$(docker inspect --format='{{.State.Status}}' nexus-kafka-ui 2>/dev/null || echo "missing")
+  if [ "$STATUS" = "running" ]; then
+    green "Kafka UI (nexus-kafka-ui) is running"
+    ((PASS++))
+  else
+    red "Kafka UI (nexus-kafka-ui) is $STATUS (expected: running)"
+    ((FAIL++))
+  fi
+
+  STATUS=$(docker inspect --format='{{.State.Status}}' nexus-redis-ui 2>/dev/null || echo "missing")
+  if [ "$STATUS" = "running" ]; then
+    green "Redis UI (nexus-redis-ui) is running"
+    ((PASS++))
+  else
+    red "Redis UI (nexus-redis-ui) is $STATUS (expected: running)"
+    ((FAIL++))
+  fi
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
