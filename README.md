@@ -167,22 +167,3 @@ PENDING → EXTRACTING → PARSING → HASHING → COMPARING → AI_ANALYSIS →
 | suspicious-pairs | hash-worker | ai-worker | Pairs needing AI analysis |
 | results | ai-worker | api-gateway | Final forensic reports |
 | dlq | Any | None | Dead letter queue for failed messages |
-
-## Phase 0 baseline
-
-| Metric | Result |
-|---|---|
-| Files processed | 100 synthetic |
-| Avg per file | 0.2ms |
-| Algorithm tests | 6/6 passing |
-| Infra startup | all healthy |
-
-## Contributing
-
-- Branch naming: phase-{n}-{dev-a|dev-b} or integration/phase-{n}
-- Every PR must pass pnpm typecheck and pytest test_algo.py -v before review
-- Cross-review required before merge — Dev A reviews Dev B's code and vice versa
-
-## License
-
-MIT
