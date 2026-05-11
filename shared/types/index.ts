@@ -104,9 +104,6 @@ export interface JobStatusEvent {
  *   AI_ANALYSIS  → set by ai-worker when first LLM call fires
  *   COMPLETE     → set by ai-worker after last ForensicResult is stored
  *   FAILED       → set by either worker on unrecoverable error
- *
- * TODO: confirm with Dev B — verify these transitions match their
- *       hash-worker implementation before Phase 2 code is written.
  */
 export type JobStatus =
   | 'PENDING'
@@ -138,8 +135,6 @@ export interface DLQHeaders {
 //
 // These are the agreed path formats used by all services. Any change here
 // requires updates in api-gateway, hash-worker, and ai-worker.
-//
-// TODO: confirm with Dev B — verify hash-worker writes to these exact paths.
 
 export const MINIO_PATHS = {
   /** Raw ZIP uploads from the API gateway */
@@ -178,9 +173,6 @@ export const KAFKA_TOPICS = {
 // Each worker type uses a dedicated consumer group for partition balancing.
 // Scaling workers (docker compose up --scale hash-worker=4) auto-balances
 // partitions across group members.
-//
-// TODO: confirm with Dev B — verify these group names are used in
-//       confluent-kafka consumer config.
 
 export const CONSUMER_GROUPS = {
   HASH_WORKERS: 'hash-workers',
