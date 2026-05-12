@@ -231,6 +231,39 @@ services:
     restart: unless-stopped
     profiles: [dev]
 
+  # ── API Gateway ────────────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+      target: runtime
+    container_name: nexus-api-gateway
+    hostname: api-gateway
+    networks: [nexus-net]
+    ports:
+      - "4000:4000"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *infra-env
+      PORT: "4000"
+      NODE_ENV: production
+      DEFAULT_SIMILARITY_THRESHOLD: "0.70"
+      API_MAX_UPLOAD_SIZE_MB: "500"
+      CORS_ORIGIN: "http://localhost:3000"
+    healthcheck:
+      test: wget -qO- http://localhost:4000/health || exit 1
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
   # ── Hash Worker ──────────────────────────────────────────────────────────────
   # ACTIVATE IN PHASE 2 — uncomment when services/hash-worker/src/main.py exists
   #

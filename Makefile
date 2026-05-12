@@ -7,6 +7,8 @@
         kafka-topics kafka-produce kafka-consume kafka-lag \
         redis-cli redis-flush redis-job \
         worker-build hash-shell \
+        api-dev api-build api-logs \
+        gql-health gql-upload gql-status \
         test-unit test-integration clean
 
 # Detect Docker network name dynamically
@@ -42,6 +44,14 @@ help:
 	@echo "Workers:"
 	@echo "  make worker-build      Build all worker Docker images"
 	@echo "  make hash-shell        Shell into hash-worker container"
+	@echo ""
+	@echo "API Gateway:"
+	@echo "  make api-dev           Start API gateway in dev mode (tsx watch)"
+	@echo "  make api-build         Build API gateway TypeScript"
+	@echo "  make api-logs          Tail API gateway Docker logs"
+	@echo "  make gql-health        Check API gateway health"
+	@echo "  make gql-upload ZIP=<path>   Upload a ZIP via GraphQL mutation"
+	@echo "  make gql-status J=<job-id>   Query job status via GraphQL"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test-unit         Run unit tests (no infra required)"
@@ -181,7 +191,41 @@ test-integration:
 	  KAFKA_BROKERS=localhost:9093 \
 	  python -m pytest tests/integration/ -v --tb=short
 
-# ── Cleanup ───────────────────────────────────────────────────────────────────
+# ── API Gateway ───────────────────────────────────────────────────────────
+
+api-dev:
+	cd apps/api-gateway && pnpm dev
+
+api-build:
+	cd apps/api-gateway && pnpm build
+
+api-logs:
+	docker compose logs api-gateway -f --tail=50
+
+# ── GraphQL helpers ──────────────────────────────────────────────────────
+
+gql-health:
+	curl -s http://localhost:4000/health | python3 -m json.tool
+
+gql-upload:
+ifndef ZIP
+	$(error Usage: make gql-upload ZIP=/path/to/file.zip)
+endif
+	curl -s -X POST http://localhost:4000/graphql \
+	  -F 'operations={"query":"mutation U { uploadSubmissions(input:{similarityThreshold:0.7}) { jobId status message } }"}' \
+	  -F 'map={}' \
+	  -F "file=@$(ZIP);type=application/zip" | python3 -m json.tool
+
+gql-status:
+ifndef J
+	$(error Usage: make gql-status J=<job-id>)
+endif
+	curl -s -X POST http://localhost:4000/graphql \
+	  -H "Content-Type: application/json" \
+	  -d '{"query": "query { jobStatus(jobId: \"$(J)\") { jobId status progress message updatedAt } }"}' | \
+	  python3 -m json.tool
+
+# ── Cleanup ───────────────────────────────────────────────────────────────
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true

@@ -12,15 +12,22 @@ services:
       KAFKA_LOG4J_ROOT_LOGLEVEL: WARN      # Reduce Kafka noise in dev
 
   # When app services are added in Phase 3+, add their dev overrides here:
-  # api-gateway:
-  #   volumes:
-  #     - ./services/api-gateway/src:/app/src:ro
-  #   environment:
-  #     LOG_LEVEL: debug
-  #     NODE_ENV: development
-  #
+  api-gateway:
+    build:
+      context: .
+      dockerfile: apps/api-gateway/Dockerfile
+      target: builder
+    volumes:
+      - ./apps/api-gateway/src:/app/apps/api-gateway/src:ro
+      - ./shared:/app/shared:ro
+    command: pnpm --filter @nexus/api-gateway dev
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+
   # hash-worker:
   #   volumes:
   #     - ./services/hash-worker/src:/app/src:ro
   #   environment:
   #     LOG_LEVEL: debug
+
