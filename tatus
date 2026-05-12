@@ -1,0 +1,141 @@
+[33mcommit e06b28317c9fae956c372e178a4c7d19ae26826c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Tue May 12 22:34:07 2026 +0530
+
+    feat: implement hash-worker service with Redis state management and MinIO integration for plagiarism analysis pipeline.
+
+[33mcommit b4539a88bce9e219cea1e1ce3ab81f4908643c72[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Tue May 12 02:40:10 2026 +0530
+
+    docs: overhaul README with architecture diagrams, setup steps, and project specifications
+
+[33mcommit 0ece11bed4713f9b2c931e8295c93825aea17ca1[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Tue May 12 02:38:16 2026 +0530
+
+    docs: overhaul README with architecture diagrams, setup steps, and project specifications
+
+[33mcommit bcdea9ba71cfba353e615c7e42493045244d0176[m
+Merge: c9b156f 06fb48b
+Author: Vaidik Saxena <83622368+10vulture1005@users.noreply.github.com>
+Date:   Tue May 12 02:30:21 2026 +0530
+
+    Merge pull request #3 from manas2406/phase-2-algo
+    
+    feat: complete Phase 2 hash-worker pipeline
+
+[33mcommit 06fb48b0d5aa768931144d50ee09a6b7b1dc75f6[m[33m ([m[1;31morigin/phase-2-algo[m[33m)[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Tue May 12 02:27:50 2026 +0530
+
+    feat: complete Phase 2 hash-worker pipeline
+
+[33mcommit c9b156f305a52486836c833c75e8652824f05765[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 19:28:13 2026 +0530
+
+    chore: remove Dev B TODO markers — schema is authoritative contract
+
+[33mcommit acb211b9e7679fe6dcb5cb3d6ba6a44cb9c2ce8e[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 19:20:43 2026 +0530
+
+    fix: replace --network host with Docker Desktop compatible listener checks in validate.sh
+
+[33mcommit cee8761bda8eb8b23afad266e9e1a2d3c9a679bf[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 19:11:31 2026 +0530
+
+    feat: initialize infrastructure tooling, add shared type contracts, and update developer documentation
+
+[33mcommit 1d9295f3c506b5d29bfc556733cdd01e82ef9765[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 01:10:33 2026 +0530
+
+    Edited .gitignore
+
+[33mcommit 1f440e85d1b61b14837e274d910b00e8d93b1b1b[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 00:28:07 2026 +0530
+
+    feat: add Redpanda Console configuration for local Kafka development
+
+[33mcommit 8507664301b7a82eaeeda2cdb836fded7b3361f2[m
+Merge: ee0bb24 7d444fd
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 00:26:25 2026 +0530
+
+    Merge branch 'main' of https://github.com/manas2406/Nexus---Code-Forensics-AI-Plagiarism-Engine.-
+
+[33mcommit ee0bb24e56e346d6d4f846e85de866e98e1e4761[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 00:26:07 2026 +0530
+
+    feat: scaffold hash-worker service with infrastructure testing, configuration, and build tooling
+
+[33mcommit 7d444fd0c702eda33661a6d6b2e65ec56b091051[m
+Merge: c85dea0 e6f75df
+Author: Vaidik Saxena <83622368+10vulture1005@users.noreply.github.com>
+Date:   Mon May 11 00:04:10 2026 +0530
+
+    Merge pull request #2 from manas2406/phase-1-algo
+    
+    feat: implement phase 1 MinHash and LSH pre-filtering
+
+[33mcommit e6f75df78bb21393152d081c32c25c74bf5920ce[m[33m ([m[1;31morigin/phase-1-algo[m[33m)[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Mon May 11 00:02:07 2026 +0530
+
+    feat: implement phase 1 MinHash and LSH pre-filtering
+
+[33mcommit c85dea00f83df7c8508e3208754a5e345eca4896[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Mon May 11 00:00:37 2026 +0530
+
+    chore: update docker-compose service configurations
+
+[33mcommit cc7cb8be3d0f03a984f347afd8e0cb085cd7f114[m
+Merge: dff5542 d1eea14
+Author: Vaidik Saxena <83622368+10vulture1005@users.noreply.github.com>
+Date:   Sun May 10 23:42:59 2026 +0530
+
+    Merge pull request #1 from manas2406/integration/phase-0
+    
+    Integration/phase 0
+
+[33mcommit d1eea14cf2a1e5040add2d4ad7ab0b9c08562a0e[m[33m ([m[1;31morigin/integration/phase-0[m[33m)[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Sun May 10 23:41:22 2026 +0530
+
+    chore: update docker-compose services and sync pnpm lockfile dependencies
+
+[33mcommit 1c6f49ef89d99f2eac6326b2cd399f676186558b[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Sun May 10 23:25:26 2026 +0530
+
+    docs: checkpoint 0 baseline results
+
+[33mcommit dff5542fa6aa0a06603a87da75129e6e6f20afeb[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Sun May 10 23:15:18 2026 +0530
+
+    feat: implement code plagiarism engine with AST-based tokenization, winnowing fingerprinting, and Jaccard similarity comparison.
+
+[33mcommit c26f5dee8d2649ef7a8d614907844afbff95c005[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Sun May 10 23:12:58 2026 +0530
+
+    feat: implement code plagiarism engine with AST-based tokenization, winnowing fingerprinting, and Jaccard similarity comparison.
+
+[33mcommit 28cc6a7a040230e795d7d06a1426d37a4b77a73c[m
+Author: manas2406 <manassh2406@gmail.com>
+Date:   Sun May 10 23:14:36 2026 +0530
+
+    feat : Phase-0 initialized project skeleton
+
+[33mcommit d93c12f005e80124f9cbe6541ab1210d22bbf073[m
+Author: 10vulture1005 <vaidiksaxena14@gmail.com>
+Date:   Sun May 10 22:53:40 2026 +0530
+
+    feat: initialize monorepo structure with Next.js, Express gateway, Python workers, and shared infrastructure configuration
