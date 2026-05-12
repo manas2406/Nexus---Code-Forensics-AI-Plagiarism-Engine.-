@@ -1,10 +1,12 @@
-"""Pytest configuration and fixtures for Phase 2 tests.
+"""Pytest configuration and fixtures for Phase 2 + Phase 3 tests.
 
 Registers the ``integration`` marker and provides shared fixtures
-for synthetic C++ plagiarism pairs.
+for synthetic C++ plagiarism pairs, mock Kafka clients, and test payloads.
 """
 
 from __future__ import annotations
+
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,8 +14,11 @@ import pytest
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers."""
     config.addinivalue_line(
-        "markers", "integration: mark test as requiring live infra (MinIO + Redis)",
+        "markers", "integration: mark test as requiring live infra (MinIO + Redis + Kafka)",
     )
+
+
+# ─── Phase 2 fixtures ────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -151,4 +156,59 @@ std::vector<int> merge(const std::vector<int>& a, const std::vector<int>& b) {
     return result;
 }
 """,
+    }
+
+
+# ─── Phase 3 fixtures ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_kafka_client() -> MagicMock:
+    """Mock HashWorkerKafkaClient with all producer methods stubbed."""
+    client = MagicMock()
+    client.produce_suspicious_pair = MagicMock()
+    client.produce_job_complete = MagicMock()
+    client.produce_to_dlq = MagicMock()
+    return client
+
+
+@pytest.fixture
+def mock_state_manager() -> MagicMock:
+    """Mock JobStateManager with update_status and publish_event stubbed."""
+    mgr = MagicMock()
+    mgr.update_status = MagicMock()
+    mgr.publish_event = MagicMock()
+    return mgr
+
+
+@pytest.fixture
+def mock_minio_client() -> MagicMock:
+    """Mock MinIOClient returning 2 C++ files from stream_cpp_files."""
+    from minio_client import ZipEntry
+
+    client = MagicMock()
+    client.stream_cpp_files = MagicMock(return_value=iter([
+        ZipEntry(
+            filename="sol_a.cpp",
+            source_code="int main(){ int x=0; for(int i=0;i<10;i++){x+=i;} return x; }",
+            size_bytes=62,
+        ),
+        ZipEntry(
+            filename="sol_b.cpp",
+            source_code="int main(){ int y=0; for(int j=0;j<10;j++){y+=j;} return y; }",
+            size_bytes=62,
+        ),
+    ]))
+    client.put_json = MagicMock()
+    client.health_check = MagicMock(return_value=True)
+    return client
+
+
+@pytest.fixture
+def valid_job_payload() -> dict[str, str]:
+    """Valid JOB_CREATED event payload for testing."""
+    return {
+        "jobId": "test-job-001",
+        "submissionZipKey": "test.zip",
+        "createdAt": "2026-01-01T00:00:00Z",
     }
