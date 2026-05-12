@@ -12,7 +12,8 @@
     "infra:down": "docker compose down -v",
     "infra:reset": "docker compose down -v && docker compose up kafka zookeeper minio redis --wait",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
