@@ -1,8 +1,8 @@
 """MinIO client wrapper for streaming ZIP processing.
 
 Provides a clean interface for:
-- Streaming .cpp/.h files from ZIP archives stored in MinIO
-- Uploading JSON result blobs
+- Streaming .cpp/.h/.cc/.cxx/.hpp/.c files from ZIP archives stored in MinIO
+- Uploading ZIP files and JSON result blobs
 - Health-checking MinIO connectivity
 
 Never imports from pipeline.py or algorithm modules — clean separation.
@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import zipfile
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -20,6 +21,9 @@ from typing import Any, Iterator
 from minio import Minio
 
 logger = logging.getLogger(__name__)
+
+# Extensions we process. Anything else is silently skipped.
+CPP_EXTENSIONS = frozenset({".cpp", ".h", ".cc", ".cxx", ".hpp", ".c"})
 
 
 @dataclass
@@ -54,15 +58,19 @@ class MinIOClient:
         object_key: str,
         max_file_bytes: int = 500_000,
     ) -> Iterator[ZipEntry]:
-        """Stream a ZIP from MinIO, yielding only .cpp and .h files.
+        """Stream a ZIP from MinIO, yielding only C/C++ source files.
 
         Downloads the ZIP object via ``get_object()``, wraps it in
         ``io.BytesIO``, and opens with ``zipfile.ZipFile`` — individual
         entries are read one at a time (no ``extractall``).
 
-        Skips files larger than *max_file_bytes* and files that cannot
-        be decoded as UTF-8.  Warnings are logged but never raised.
-        Never yields partial entries.
+        Filters applied:
+        - Only files matching CPP_EXTENSIONS (.cpp, .h, .cc, .cxx, .hpp, .c)
+        - __MACOSX/ and ._ prefixed entries (macOS ZIP artifacts) are skipped
+        - Files larger than *max_file_bytes* are skipped with a warning
+        - Non-UTF-8 files are skipped with a warning
+
+        Never yields partial entries. Never raises on per-file errors.
         """
         response = self._client.get_object(bucket, object_key)
         try:
@@ -77,31 +85,57 @@ class MinIOClient:
                 if info.is_dir():
                     continue
 
-                # Filter: only .cpp and .h files
-                if not info.filename.endswith((".cpp", ".h")):
+                filename = info.filename
+
+                # Skip macOS metadata entries
+                if filename.startswith("__MACOSX") or os.path.basename(filename).startswith("._"):
+                    continue
+
+                # Filter: only C/C++ source files
+                suffix = os.path.splitext(filename)[1].lower()
+                if suffix not in CPP_EXTENSIONS:
                     continue
 
                 # Size check before reading content
                 if info.file_size > max_file_bytes:
                     logger.warning(
                         "SKIP %s: %d bytes exceeds limit %d",
-                        info.filename, info.file_size, max_file_bytes,
+                        filename, info.file_size, max_file_bytes,
                     )
                     continue
 
                 # Read and decode
                 try:
-                    raw = zf.read(info.filename)
+                    raw = zf.read(filename)
                     source_code = raw.decode("utf-8")
                 except (UnicodeDecodeError, KeyError) as exc:
-                    logger.warning("SKIP %s: %s", info.filename, exc)
+                    logger.warning("SKIP %s: %s", filename, exc)
                     continue
 
                 yield ZipEntry(
-                    filename=info.filename,
+                    filename=filename,
                     source_code=source_code,
                     size_bytes=info.file_size,
                 )
+
+    def upload_zip(
+        self,
+        bucket: str,
+        object_key: str,
+        data: io.BytesIO,
+        length: int,
+    ) -> str:
+        """Upload a ZIP file to MinIO. Returns the object key."""
+        data.seek(0)
+        self._client.put_object(
+            bucket_name=bucket,
+            object_name=object_key,
+            data=data,
+            length=length,
+            content_type="application/zip",
+        )
+        logger.info("Uploaded ZIP | key=%s | size=%d", object_key, length)
+        return object_key
 
     def put_json(
         self,

@@ -2,21 +2,25 @@
 
 Usage:
     python main.py --zip <bucket>/<object_key> --job-id <uuid>
-
-Example:
-    python main.py --zip nexus-submissions/test.zip --job-id abc-123
+    python main.py --zip nexus-submissions/test.zip --job-id abc-123 --output table
 
 Reads a ZIP from MinIO, processes every .cpp/.h file through the
 AST → Winnowing → LSH → Jaccard pipeline, writes results to MinIO
 and job status to Redis.
+
+State transitions published to Redis throughout:
+    PENDING → EXTRACTING → PARSING → HASHING → COMPARING → COMPLETE (or FAILED)
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,11 +37,16 @@ from state import JobStateManager, JobStatus
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
+# Add shared/ to sys.path for schemas import
+sys.path.insert(0, str(_REPO_ROOT / "shared"))
+from schemas import SuspiciousPairEvent, extracted_file_key
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
 )
-logger = logging.getLogger("nexus.main")
+logger = logging.getLogger("nexus.hash-worker")
 
 
 def _build_minio_client() -> MinIOClient:
@@ -74,9 +83,209 @@ def _build_state_manager() -> JobStateManager:
     return JobStateManager(redis_url=redis_url)
 
 
+class PipelineError(Exception):
+    """Raised for unrecoverable errors that should fail the entire job."""
+    pass
+
+
+def run_pipeline(
+    job_id: str,
+    bucket: str,
+    object_key: str,
+    threshold: float = 0.6,
+    lsh_threshold: float = 0.5,
+    lsh_num_perm: int = 128,
+    max_file_bytes: int = 500_000,
+    minio: MinIOClient | None = None,
+    state: JobStateManager | None = None,
+) -> list[SuspiciousPairEvent]:
+    """Full pipeline: MinIO ZIP → suspicious pairs list.
+
+    State transitions published to Redis throughout:
+      PENDING → EXTRACTING → PARSING → HASHING → COMPARING → COMPLETE (or FAILED)
+
+    Returns list of SuspiciousPairEvent dataclasses.
+    Raises PipelineError on unrecoverable failure.
+    """
+    t_start = time.perf_counter()
+
+    if minio is None:
+        minio = _build_minio_client()
+    if state is None:
+        state = _build_state_manager()
+
+    logger.info(
+        "Pipeline starting | job=%s | bucket=%s | key=%s | threshold=%.2f",
+        job_id, bucket, object_key, threshold,
+    )
+
+    def _transition(status: JobStatus, progress: int, message: str) -> None:
+        state.update_status(job_id, status, progress, message)
+        logger.info("[%s] %s (%d%%) — %s", job_id[:8], status.value, progress, message)
+
+    # ── PENDING ─────────────────────────────────────────────────────
+    _transition(JobStatus.PENDING, 0, "Job received")
+
+    try:
+        # ── EXTRACTING ──────────────────────────────────────────────
+        _transition(JobStatus.EXTRACTING, 2, "Downloading ZIP from MinIO...")
+
+        files: dict[str, str] = {}
+        try:
+            for entry in minio.stream_cpp_files(
+                bucket, object_key, max_file_bytes=max_file_bytes,
+            ):
+                files[entry.filename] = entry.source_code
+                logger.debug("  Found: %s (%d bytes)", entry.filename, entry.size_bytes)
+        except Exception as exc:
+            raise PipelineError(f"Failed to read ZIP {bucket}/{object_key}: {exc}") from exc
+
+        if not files:
+            raise PipelineError(
+                f"ZIP contains zero processable C++ files in {bucket}/{object_key}"
+            )
+
+        n = len(files)
+        logger.info("Extracted %d C++ files from ZIP", n)
+
+        # ── PARSING ─────────────────────────────────────────────────
+        _transition(JobStatus.PARSING, 10, f"Parsing {n} C++ files...")
+
+        batch = process_batch(files, max_bytes=max_file_bytes)
+
+        logger.info(
+            "Parsing complete: %d/%d files yielded tokens (%d skipped)",
+            batch.processed, batch.total_files, len(batch.skipped),
+        )
+
+        if batch.processed < 2:
+            raise PipelineError(
+                f"Need at least 2 parseable files for comparison. "
+                f"Got {batch.processed} parseable, {len(batch.skipped)} skipped."
+            )
+
+        # Log partial parse info
+        for fname, result in batch.parse_results.items():
+            if result.had_errors:
+                logger.info("Partial parse: %s (had ERROR nodes)", fname)
+
+        # ── HASHING ─────────────────────────────────────────────────
+        _transition(
+            JobStatus.HASHING, 40,
+            f"Computing Winnowing fingerprints for {batch.processed} files...",
+        )
+
+        avg_fp = (
+            sum(len(fp) for fp in batch.fingerprints.values()) / len(batch.fingerprints)
+            if batch.fingerprints
+            else 0
+        )
+        logger.info(
+            "Fingerprints computed | files=%d | avg_size=%.1f",
+            len(batch.fingerprints), avg_fp,
+        )
+
+        # ── COMPARING (LSH + Jaccard) ──────────────────────────────
+        total_possible = batch.processed * (batch.processed - 1) // 2
+
+        _transition(
+            JobStatus.COMPARING, 55,
+            f"Building LSH index for {batch.processed} files "
+            f"({total_possible:,} possible pairs)...",
+        )
+
+        lsh = LSHIndex(threshold=lsh_threshold, num_perm=lsh_num_perm)
+        candidates = lsh.get_all_candidates(batch.fingerprints)
+
+        logger.info(
+            "LSH pre-filter: %d/%d pairs are candidates (%.1f%% reduction)",
+            len(candidates), total_possible,
+            (1 - len(candidates) / max(total_possible, 1)) * 100,
+        )
+
+        _transition(
+            JobStatus.COMPARING, 65,
+            f"Running Jaccard similarity on {len(candidates)} candidate pairs...",
+        )
+
+        suspicious_pairs_raw = compare_candidates(
+            candidates, batch.fingerprints, threshold=threshold,
+        )
+
+        # Convert to SuspiciousPairEvent schema
+        suspicious_pairs: list[SuspiciousPairEvent] = []
+        for pair in suspicious_pairs_raw:
+            event = SuspiciousPairEvent.create(
+                job_id=job_id,
+                file_a=pair.file_a,
+                file_b=pair.file_b,
+                score=pair.similarity,
+                fp_size_a=len(batch.fingerprints.get(pair.file_a, set())),
+                fp_size_b=len(batch.fingerprints.get(pair.file_b, set())),
+            )
+            suspicious_pairs.append(event)
+            logger.info(
+                "🚨 SUSPICIOUS  %s ↔ %s  score=%.4f",
+                pair.file_a, pair.file_b, pair.similarity,
+            )
+
+        logger.info("Found %d suspicious pairs", len(suspicious_pairs))
+
+        # ── Build result JSON ───────────────────────────────────────
+        elapsed = time.perf_counter() - t_start
+
+        result: dict[str, object] = {
+            "jobId": job_id,
+            "totalFiles": batch.processed,
+            "skipped": batch.skipped,
+            "suspiciousPairs": [dataclasses.asdict(p) for p in suspicious_pairs],
+            "lshCandidates": len(candidates),
+            "totalPossiblePairs": total_possible,
+            "elapsedSeconds": round(elapsed, 3),
+            "completedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Upload result JSON to MinIO
+        result_key = f"results/{job_id}.json"
+        minio.put_json(bucket=bucket, object_key=result_key, data=result)
+        logger.info("Result uploaded to %s/%s", bucket, result_key)
+
+        # Store pair IDs in Redis for AI worker
+        if suspicious_pairs:
+            state.set_job_pairs(job_id, [p.pairId for p in suspicious_pairs])
+
+        # ── COMPLETE ────────────────────────────────────────────────
+        _transition(
+            JobStatus.COMPLETE, 100,
+            f"Complete | {batch.processed} files | "
+            f"{len(suspicious_pairs)} suspicious pairs | "
+            f"{elapsed:.2f}s",
+        )
+
+        logger.info(
+            "Pipeline complete | job=%s | files=%d | pairs=%d | elapsed=%.3fs",
+            job_id, batch.processed, len(suspicious_pairs), elapsed,
+        )
+
+        return suspicious_pairs
+
+    except PipelineError as e:
+        logger.error("Pipeline failed | job=%s | %s", job_id, e)
+        _transition(JobStatus.FAILED, 0, f"Pipeline error: {e}")
+        raise
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.exception("Unexpected pipeline error | job=%s", job_id)
+        _transition(JobStatus.FAILED, 0, f"Unexpected error: {type(e).__name__}: {e}")
+        raise
+
+
 def main() -> int:
-    """Run the full Nexus plagiarism-detection pipeline."""
-    parser = argparse.ArgumentParser(description="Nexus Hash Worker Pipeline")
+    """CLI entry point for the Nexus plagiarism-detection pipeline."""
+    parser = argparse.ArgumentParser(
+        description="Nexus Hash Worker — standalone pipeline runner",
+    )
     parser.add_argument(
         "--zip", required=True,
         help="<bucket>/<object_key> path to the ZIP in MinIO",
@@ -84,6 +293,16 @@ def main() -> int:
     parser.add_argument(
         "--job-id", required=True,
         help="Unique job identifier (UUID)",
+    )
+    parser.add_argument(
+        "--threshold", type=float,
+        default=None,
+        help="Jaccard similarity threshold (default: env SUSPICIOUS_PAIR_THRESHOLD or 0.6)",
+    )
+    parser.add_argument(
+        "--output", choices=["json", "table"],
+        default="table",
+        help="Output format (default: table)",
     )
     args = parser.parse_args()
 
@@ -96,7 +315,7 @@ def main() -> int:
     job_id: str = args.job_id
 
     # ── Config from environment ───────────────────────────────────────
-    threshold = float(os.getenv("SUSPICIOUS_PAIR_THRESHOLD", "0.6"))
+    threshold = args.threshold or float(os.getenv("SUSPICIOUS_PAIR_THRESHOLD", "0.6"))
     lsh_threshold = float(os.getenv("LSH_THRESHOLD", "0.5"))
     lsh_num_perm = int(os.getenv("LSH_NUM_PERM", "128"))
     max_file_bytes = int(os.getenv("MAX_FILE_BYTES", "500000"))
@@ -114,116 +333,44 @@ def main() -> int:
         return 1
     logger.info("Health checks passed — MinIO and Redis are reachable")
 
-    # ── Step 4: PENDING ───────────────────────────────────────────────
-    state.update_status(job_id, JobStatus.PENDING)
-
     try:
-        # ── Step 5: Stream files from ZIP ─────────────────────────────
-        logger.info("Streaming %s/%s from MinIO...", bucket, object_key)
-        files: dict[str, str] = {}
-        try:
-            for entry in minio.stream_cpp_files(
-                bucket, object_key, max_file_bytes=max_file_bytes,
-            ):
-                files[entry.filename] = entry.source_code
-                logger.info("  Found: %s (%d bytes)", entry.filename, entry.size_bytes)
-        except Exception as exc:
-            state.update_status(job_id, JobStatus.FAILED, detail=f"ZIP error: {exc}")
-            print(f"ERROR: Failed to read ZIP {bucket}/{object_key}: {exc}", file=sys.stderr)
-            return 1
-
-        if not files:
-            state.update_status(
-                job_id, JobStatus.FAILED, detail="ZIP contains zero .cpp/.h files",
-            )
-            print("ERROR: ZIP contains zero .cpp/.h files", file=sys.stderr)
-            return 1
-
-        n = len(files)
-        logger.info("Found %d .cpp/.h files", n)
-
-        # ── Step 6: PARSING ───────────────────────────────────────────
-        state.update_status(job_id, JobStatus.PARSING, detail=f"{n} files found")
-
-        # ── Step 7: process_batch ─────────────────────────────────────
-        logger.info("Processing batch...")
-        batch = process_batch(files, max_bytes=max_file_bytes)
-
-        # ── Step 8: HASHING ───────────────────────────────────────────
-        state.update_status(
-            job_id, JobStatus.HASHING,
-            detail=f"{batch.processed} files parsed, {len(batch.skipped)} skipped",
+        pairs = run_pipeline(
+            job_id=job_id,
+            bucket=bucket,
+            object_key=object_key,
+            threshold=threshold,
+            lsh_threshold=lsh_threshold,
+            lsh_num_perm=lsh_num_perm,
+            max_file_bytes=max_file_bytes,
+            minio=minio,
+            state=state,
         )
 
-        # ── Step 9: LSH candidates ────────────────────────────────────
-        logger.info(
-            "Running LSH pre-filter (threshold=%.2f, num_perm=%d)...",
-            lsh_threshold, lsh_num_perm,
-        )
-        lsh = LSHIndex(threshold=lsh_threshold, num_perm=lsh_num_perm)
-        candidates = lsh.get_all_candidates(batch.fingerprints)
-        logger.info("Found %d candidate pairs", len(candidates))
-
-        # ── Step 10: Exact comparison ─────────────────────────────────
-        logger.info("Running exact Jaccard comparison (threshold=%.2f)...", threshold)
-        suspicious_pairs = compare_candidates(
-            candidates, batch.fingerprints, threshold=threshold,
-        )
-        logger.info("Found %d suspicious pairs", len(suspicious_pairs))
-
-        # ── Step 11: Build result JSON ────────────────────────────────
-        result: dict[str, object] = {
-            "jobId": job_id,
-            "totalFiles": batch.processed,
-            "skipped": batch.skipped,
-            "suspiciousPairs": [
-                {
-                    "pairId": pair.pair_id,
-                    "fileA": pair.file_a,
-                    "fileB": pair.file_b,
-                    "similarity": pair.similarity,
-                }
-                for pair in suspicious_pairs
-            ],
-            "completedAt": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # ── Step 12: Upload result ────────────────────────────────────
-        result_key = f"results/{job_id}.json"
-        minio.put_json(bucket=bucket, object_key=result_key, data=result)
-        logger.info("Result uploaded to %s/%s", bucket, result_key)
-
-        # ── Step 13: COMPLETE ─────────────────────────────────────────
-        state.update_status(
-            job_id, JobStatus.COMPLETE,
-            detail=f"{len(suspicious_pairs)} suspicious pairs found",
-        )
-
-        # ── Step 14: Publish event ────────────────────────────────────
-        state.publish_event(job_id, result)
-
-        # ── Step 15: Print summary ────────────────────────────────────
-        print(f"\n{'=' * 60}")
-        print(f"  Nexus Pipeline — Job {job_id}")
-        print(f"{'=' * 60}")
-        print(f"  Files processed : {batch.processed}")
-        print(f"  Files skipped   : {len(batch.skipped)}")
-        print(f"  Candidates (LSH): {len(candidates)}")
-        print(f"  Suspicious pairs: {len(suspicious_pairs)}")
-        print(f"  Elapsed         : {batch.elapsed_seconds:.3f}s")
-        print(f"  Result JSON     : {bucket}/{result_key}")
-        print(f"{'=' * 60}\n")
-
-        for pair in suspicious_pairs:
-            print(f"  \u26a0 {pair.file_a} \u2194 {pair.file_b}  (similarity: {pair.similarity:.4f})")
+        if args.output == "json":
+            output = [dataclasses.asdict(p) for p in pairs]
+            print(json.dumps(output, indent=2))
+        else:
+            # Table output
+            print(f"\n{'=' * 70}")
+            print(f"  Nexus Pipeline — Job {job_id}")
+            print(f"{'=' * 70}")
+            if not pairs:
+                print("  No suspicious pairs found.")
+            else:
+                print(f"\n{'Score':>6}  {'File A':<30}  {'File B':<30}")
+                print("-" * 70)
+                for p in sorted(pairs, key=lambda x: x.similarityScore, reverse=True):
+                    print(f"{p.similarityScore:>6.3f}  {p.fileAName:<30}  {p.fileBName:<30}")
+            print(f"{'=' * 70}\n")
 
         return 0
 
-    except Exception:
-        tb = traceback.format_exc()
-        logger.error("Pipeline failed:\n%s", tb)
-        state.update_status(job_id, JobStatus.FAILED, detail=tb[:500])
+    except PipelineError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

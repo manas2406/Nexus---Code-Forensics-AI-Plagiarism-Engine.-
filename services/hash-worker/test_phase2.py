@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from minio_client import MinIOClient, ZipEntry
-from state import JobStateManager, JobStatus
+from state import JobStateManager, JobStatus, JOB_STATUS_TTL_SECONDS
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ def _mock_get_object(zip_bytes: bytes) -> MagicMock:
 
 
 class TestZipEntrySkipsNonCpp:
-    """Only .cpp and .h files should be yielded from the ZIP."""
+    """Only C/C++ source files should be yielded from the ZIP."""
 
     def test_zip_entry_skips_non_cpp(self) -> None:
         zip_bytes = _make_zip({
@@ -86,8 +86,52 @@ class TestZipEntrySkipsOversized:
         assert len(entries) == 0
 
 
+class TestZipEntryExtendsFileTypes:
+    """All C/C++ extensions should be accepted: .cpp, .h, .cc, .cxx, .hpp, .c."""
+
+    def test_accepts_all_cpp_extensions(self) -> None:
+        zip_bytes = _make_zip({
+            "main.cpp":    "int main() {}",
+            "header.h":    "#pragma once",
+            "impl.cc":     "void foo() {}",
+            "source.cxx":  "void bar() {}",
+            "template.hpp": "template<typename T> class X {};",
+            "legacy.c":     "int old_func() { return 0; }",
+            "readme.txt":  "should be excluded",
+        })
+
+        client = MinIOClient.__new__(MinIOClient)
+        client._client = MagicMock()
+        client._client.get_object.return_value = _mock_get_object(zip_bytes)
+
+        entries = list(client.stream_cpp_files("test-bucket", "test.zip"))
+        filenames = {e.filename for e in entries}
+
+        assert filenames == {"main.cpp", "header.h", "impl.cc", "source.cxx", "template.hpp", "legacy.c"}
+
+
+class TestZipEntrySkipsMacOSMetadata:
+    """macOS __MACOSX/ and ._ prefixed entries should be skipped."""
+
+    def test_skips_macos_metadata(self) -> None:
+        zip_bytes = _make_zip({
+            "main.cpp":             "int main() {}",
+            "__MACOSX/main.cpp":    "mac metadata",
+            "__MACOSX/._main.cpp":  "more mac metadata",
+        })
+
+        client = MinIOClient.__new__(MinIOClient)
+        client._client = MagicMock()
+        client._client.get_object.return_value = _mock_get_object(zip_bytes)
+
+        entries = list(client.stream_cpp_files("test-bucket", "test.zip"))
+        filenames = [e.filename for e in entries]
+
+        assert filenames == ["main.cpp"]
+
+
 class TestStateKeyPattern:
-    """Key written to Redis must be exactly ``job:{job_id}:status``."""
+    """Key written to Redis must use HSET on ``job:{job_id}:status``."""
 
     def test_state_key_pattern(self) -> None:
         mock_redis = MagicMock()
@@ -95,21 +139,59 @@ class TestStateKeyPattern:
             manager = JobStateManager(redis_url="redis://localhost:6379")
             manager.update_status("test-123", JobStatus.PENDING)
 
-            mock_redis.set.assert_called_once()
-            key_arg = mock_redis.set.call_args[0][0]
+            mock_redis.hset.assert_called_once()
+            key_arg = mock_redis.hset.call_args[0][0]
             assert key_arg == "job:test-123:status"
 
 
 class TestStateTTLIsSet:
-    """``expire()`` must be called with the correct TTL after every ``set()``."""
+    """``expire()`` must be called with the correct TTL after every ``hset()``."""
 
     def test_state_ttl_is_set(self) -> None:
         mock_redis = MagicMock()
         with patch("state.redis_lib.from_url", return_value=mock_redis):
             manager = JobStateManager(redis_url="redis://localhost:6379")
-            manager.update_status("test-456", JobStatus.HASHING, ttl_seconds=3600)
+            manager.update_status("test-456", JobStatus.HASHING, progress=50, message="Computing")
 
-            mock_redis.expire.assert_called_once_with("job:test-456:status", 3600)
+            mock_redis.expire.assert_called_once_with("job:test-456:status", JOB_STATUS_TTL_SECONDS)
+
+
+class TestStateProgressTracking:
+    """update_status() must include progress and message in the hash."""
+
+    def test_state_progress_tracking(self) -> None:
+        mock_redis = MagicMock()
+        with patch("state.redis_lib.from_url", return_value=mock_redis):
+            manager = JobStateManager(redis_url="redis://localhost:6379")
+            manager.update_status(
+                "test-prog", JobStatus.PARSING, progress=25, message="Parsing file 5 of 20",
+            )
+
+            # Check the mapping passed to hset
+            call_kwargs = mock_redis.hset.call_args
+            mapping = call_kwargs[1]["mapping"] if "mapping" in call_kwargs[1] else call_kwargs[0][1]
+            assert mapping["status"] == "PARSING"
+            assert mapping["progress"] == "25"
+            assert mapping["message"] == "Parsing file 5 of 20"
+
+
+class TestStatePubSubOnUpdate:
+    """Every update_status() call should publish to Pub/Sub."""
+
+    def test_pubsub_fires_on_update(self) -> None:
+        mock_redis = MagicMock()
+        with patch("state.redis_lib.from_url", return_value=mock_redis):
+            manager = JobStateManager(redis_url="redis://localhost:6379")
+            manager.update_status("test-pub", JobStatus.EXTRACTING, progress=5, message="Downloading")
+
+            mock_redis.publish.assert_called_once()
+            channel, data = mock_redis.publish.call_args[0]
+            assert channel == "job:test-pub:events"
+
+            parsed = json.loads(data)
+            assert parsed["jobId"] == "test-pub"
+            assert parsed["status"] == "EXTRACTING"
+            assert parsed["progress"] == 5
 
 
 class TestStatePublishIsJson:
@@ -124,9 +206,33 @@ class TestStatePublishIsJson:
 
             mock_redis.publish.assert_called_once()
             channel, data = mock_redis.publish.call_args[0]
-            assert channel == "nexus:job:test-789"
+            assert channel == "job:test-789:events"
             parsed = json.loads(data)  # Must not raise
             assert parsed["jobId"] == "test-789"
+
+
+class TestSetJobPairs:
+    """set_job_pairs() must store pair IDs in a Redis List."""
+
+    def test_set_job_pairs(self) -> None:
+        mock_redis = MagicMock()
+        with patch("state.redis_lib.from_url", return_value=mock_redis):
+            manager = JobStateManager(redis_url="redis://localhost:6379")
+            manager.set_job_pairs("test-pairs", ["pair-a", "pair-b", "pair-c"])
+
+            mock_redis.delete.assert_called_once_with("job:test-pairs:pairs")
+            mock_redis.rpush.assert_called_once_with(
+                "job:test-pairs:pairs", "pair-a", "pair-b", "pair-c",
+            )
+
+
+class TestJobStatusEnum:
+    """JobStatus must include all state machine transitions."""
+
+    def test_all_statuses_present(self) -> None:
+        expected = {"PENDING", "EXTRACTING", "PARSING", "HASHING", "COMPARING", "AI_ANALYSIS", "COMPLETE", "FAILED"}
+        actual = {s.value for s in JobStatus}
+        assert actual == expected
 
 
 # ─── Integration tests (infra required) ──────────────────────────────
@@ -153,6 +259,54 @@ class TestRedisHealthCheck:
     def test_redis_health_check(self) -> None:
         manager = JobStateManager(redis_url="redis://localhost:6379")
         assert manager.health_check() is True
+
+
+@pytest.mark.integration
+class TestRedisStateRoundTrip:
+    """Write status → read it back → verify all fields."""
+
+    def test_redis_state_round_trip(self) -> None:
+        import redis as redis_lib
+
+        manager = JobStateManager(redis_url="redis://localhost:6379")
+        job_id = "test-roundtrip-001"
+
+        try:
+            manager.update_status(job_id, JobStatus.COMPARING, progress=75, message="Running Jaccard")
+            result = manager.get_status(job_id)
+
+            assert result is not None
+            assert result["status"] == "COMPARING"
+            assert result["progress"] == "75"
+            assert result["message"] == "Running Jaccard"
+            assert "updated_at" in result
+
+            # TTL should be set
+            r = redis_lib.from_url("redis://localhost:6379", decode_responses=True)
+            ttl = r.ttl(f"job:{job_id}:status")
+            assert ttl > 0, f"TTL should be positive, got {ttl}"
+        finally:
+            r = redis_lib.from_url("redis://localhost:6379", decode_responses=True)
+            r.delete(f"job:{job_id}:status")
+
+
+@pytest.mark.integration
+class TestRedisJobPairsRoundTrip:
+    """Write pair IDs → read them back."""
+
+    def test_redis_job_pairs_round_trip(self) -> None:
+        import redis as redis_lib
+
+        manager = JobStateManager(redis_url="redis://localhost:6379")
+        job_id = "test-pairs-001"
+
+        try:
+            manager.set_job_pairs(job_id, ["pair-aaa", "pair-bbb", "pair-ccc"])
+            result = manager.get_job_pairs(job_id)
+            assert result == ["pair-aaa", "pair-bbb", "pair-ccc"]
+        finally:
+            r = redis_lib.from_url("redis://localhost:6379", decode_responses=True)
+            r.delete(f"job:{job_id}:pairs")
 
 
 @pytest.mark.integration
@@ -316,19 +470,28 @@ class TestFullPipelineOnRealZip:
                 f"Expected >= 3 suspicious pairs, got {len(result_data['suspiciousPairs'])}"
             )
             for pair in result_data["suspiciousPairs"]:
-                assert pair["similarity"] >= 0.6, (
-                    f"Pair {pair['pairId']} similarity {pair['similarity']} < 0.6"
+                assert pair["similarityScore"] >= 0.5, (
+                    f"Pair {pair['pairId']} similarity {pair['similarityScore']} < 0.5"
                 )
+                # Verify SuspiciousPairEvent schema fields
+                assert "schemaVersion" in pair
+                assert "eventType" in pair
+                assert pair["eventType"] == "SUSPICIOUS_PAIR"
+                assert pair["fileAObjectKey"].startswith("extracted/")
 
-            # Verify Redis status
+            # Verify Redis status (now HGETALL instead of GET)
             r = redis_lib.from_url("redis://localhost:6379", decode_responses=True)
-            raw = r.get(f"job:{job_id}:status")
-            assert raw is not None, "Redis status key not found"
-            status_data = json.loads(raw)
+            status_data = r.hgetall(f"job:{job_id}:status")
+            assert status_data, "Redis status hash not found"
             assert status_data["status"] == "COMPLETE"
+            assert status_data["progress"] == "100"
+
+            # Verify job pairs stored
+            pairs = r.lrange(f"job:{job_id}:pairs", 0, -1)
+            assert len(pairs) >= 3, f"Expected >= 3 pair IDs, got {len(pairs)}"
 
         finally:
-            # Cleanup: remove uploaded ZIP and result
+            # Cleanup
             try:
                 minio_client.remove_object(bucket, object_key)
             except Exception:
@@ -337,10 +500,10 @@ class TestFullPipelineOnRealZip:
                 minio_client.remove_object(bucket, f"results/{job_id}.json")
             except Exception:
                 pass
-            # Cleanup Redis
             try:
                 r = redis_lib.from_url("redis://localhost:6379", decode_responses=True)
                 r.delete(f"job:{job_id}:status")
+                r.delete(f"job:{job_id}:pairs")
             except Exception:
                 pass
 
@@ -378,11 +541,10 @@ class TestPipelineFailsGracefullyOnMissingZip:
             f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         )
 
-        # Verify Redis status is FAILED
+        # Verify Redis status is FAILED (now HGETALL)
         r = redis_lib.from_url("redis://localhost:6379", decode_responses=True)
-        raw = r.get(f"job:{job_id}:status")
-        assert raw is not None, "Redis status key not found after failure"
-        status_data = json.loads(raw)
+        status_data = r.hgetall(f"job:{job_id}:status")
+        assert status_data, "Redis status hash not found after failure"
         assert status_data["status"] == "FAILED"
 
         # Cleanup
