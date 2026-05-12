@@ -158,6 +158,16 @@ PENDING → EXTRACTING → PARSING → HASHING → COMPARING → AI_ANALYSIS →
 | COMPLETE | ai-worker | Report generated and saved |
 | FAILED | Any | Unrecoverable error occurred |
 
+## Phase 2 baseline
+
+- Pipeline: 8-file ZIP processed end-to-end in <0.1s
+- Redis: all state transitions verified (PENDING → EXTRACTING → PARSING → HASHING → COMPARING → COMPLETE)
+- MinIO: results JSON written and verified (3/3 known plagiarism pairs detected at similarity=1.000)
+- Unit tests: 25/25 passing (`pytest test_algo.py test_phase1.py test_phase2.py -m "not integration" -v`)
+- Integration tests: 6/6 passing (`pytest test_phase2.py -m integration -v`)
+- TypeScript typecheck: zero errors
+- Checkpoint 2: complete
+
 ## Kafka topics
 
 | Topic | Producer | Consumer | Purpose |
