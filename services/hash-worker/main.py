@@ -1,12 +1,18 @@
-"""Nexus Hash Worker — Phase 2 standalone pipeline.
+"""Nexus Hash Worker — Phase 2 + Phase 3 entry point.
 
 Usage:
-    python main.py --zip <bucket>/<object_key> --job-id <uuid>
-    python main.py --zip nexus-submissions/test.zip --job-id abc-123 --output table
+    python main.py --zip <bucket>/<object_key> --job-id <uuid>   # Phase 2 mode
+    python main.py --kafka                                        # Phase 3 mode
 
-Reads a ZIP from MinIO, processes every .cpp/.h file through the
-AST → Winnowing → LSH → Jaccard pipeline, writes results to MinIO
-and job status to Redis.
+Phase 2 (--zip):
+    Reads a ZIP from MinIO, processes every .cpp/.h file through the
+    AST → Winnowing → LSH → Jaccard pipeline, writes results to MinIO
+    and job status to Redis.
+
+Phase 3 (--kafka):
+    Consumes JOB_CREATED events from the Kafka 'submissions' topic,
+    runs the full pipeline, produces suspicious pairs to 'suspicious-pairs',
+    produces JOB_COMPLETE to 'results', and routes failures to the DLQ.
 
 State transitions published to Redis throughout:
     PENDING → EXTRACTING → PARSING → HASHING → COMPARING → COMPLETE (or FAILED)
@@ -15,15 +21,18 @@ State transitions published to Redis throughout:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import json
 import logging
 import os
+import signal
 import sys
 import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from types import FrameType
 
 from dotenv import load_dotenv
 
@@ -281,18 +290,140 @@ def run_pipeline(
         raise
 
 
+# ── Kafka mode (Phase 3) ─────────────────────────────────────────────────────
+
+# Global shutdown flag for SIGTERM handling
+_shutdown = False
+
+
+def _handle_sigterm(sig: int, frame: FrameType | None) -> None:
+    """SIGTERM handler — sets shutdown flag for graceful drain."""
+    global _shutdown
+    _shutdown = True
+    logging.info("[hash-worker] SIGTERM received — draining in-flight messages")
+
+
+def run_kafka_worker() -> int:
+    """Start the hash-worker in Kafka consumer mode.
+
+    1. Load config from env
+    2. Health check Kafka + MinIO + Redis — exit code 1 if any unreachable
+    3. Register SIGTERM handler → sets a shutdown flag
+    4. Build KafkaConfig, MinIOClient, JobStateManager
+    5. Instantiate HashWorkerKafkaClient
+    6. Start consuming
+    """
+    from handler import WorkerConfig, handle_job_created
+    from kafka_client import HashWorkerKafkaClient, KafkaConfig
+
+    # Register SIGTERM handler
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Load config
+    broker = os.getenv("KAFKA_BROKERS", "localhost:9092")
+    kafka_config = KafkaConfig(
+        broker=broker,
+        consumer_group="hash-workers",
+        input_topic=os.getenv("KAFKA_INPUT_TOPIC", "submissions"),
+        suspicious_pairs_topic=os.getenv(
+            "KAFKA_SUSPICIOUS_PAIRS_TOPIC", "suspicious-pairs",
+        ),
+        results_topic=os.getenv("KAFKA_RESULTS_TOPIC", "forensic-results"),
+        dlq_topic=os.getenv("KAFKA_DLQ_TOPIC", "dead-letter"),
+    )
+
+    worker_config = WorkerConfig.from_env()
+    minio_client = _build_minio_client()
+    state_mgr = _build_state_manager()
+
+    # Health checks
+    if not minio_client.health_check():
+        logger.error("MinIO is unreachable — aborting Kafka mode")
+        return 1
+    if not state_mgr.health_check():
+        logger.error("Redis is unreachable — aborting Kafka mode")
+        return 1
+
+    # Build Kafka client (also validates broker connectivity)
+    try:
+        client = HashWorkerKafkaClient(kafka_config)
+    except Exception as e:
+        logger.error("Failed to connect to Kafka broker: %s", e)
+        return 1
+
+    if not client.health_check():
+        logger.warning(
+            "Kafka health check returned False — broker may not be fully ready, "
+            "but continuing (consumer will retry on poll)"
+        )
+
+    logger.info(
+        "[hash-worker] Kafka mode — listening on '%s' topic",
+        kafka_config.input_topic,
+    )
+
+    # Wire the shutdown flag into the client
+    def _check_shutdown() -> None:
+        if _shutdown:
+            client.shutdown = True
+
+    # Start consuming
+    try:
+        # Periodic shutdown check — we hook into the client's poll loop
+        # by setting the shutdown flag on the client instance
+        import threading
+
+        def _shutdown_watcher() -> None:
+            """Background thread that propagates SIGTERM to the client."""
+            while not _shutdown:
+                import time as _time
+                _time.sleep(0.5)
+            client.shutdown = True
+
+        watcher = threading.Thread(target=_shutdown_watcher, daemon=True)
+        watcher.start()
+
+        client.start(
+            handler=lambda payload: handle_job_created(
+                payload,
+                kafka=client,
+                state=state_mgr,
+                minio=minio_client,
+                config=worker_config,
+            )
+        )
+    except KeyboardInterrupt:
+        logger.info("[hash-worker] KeyboardInterrupt — shutting down")
+    finally:
+        client.close()
+
+    logger.info("[hash-worker] Shutdown complete")
+    return 0
+
+
+# ── CLI entry point ──────────────────────────────────────────────────────────
+
+
 def main() -> int:
     """CLI entry point for the Nexus plagiarism-detection pipeline."""
     parser = argparse.ArgumentParser(
         description="Nexus Hash Worker — standalone pipeline runner",
     )
-    parser.add_argument(
-        "--zip", required=True,
-        help="<bucket>/<object_key> path to the ZIP in MinIO",
+
+    # Mode selection — mutually exclusive
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "--kafka", action="store_true",
+        help="Start in Kafka consumer mode (Phase 3)",
     )
+    mode_group.add_argument(
+        "--zip",
+        help="<bucket>/<object_key> path to the ZIP in MinIO (Phase 2)",
+    )
+
     parser.add_argument(
-        "--job-id", required=True,
-        help="Unique job identifier (UUID)",
+        "--job-id",
+        help="Unique job identifier (UUID) — required with --zip",
     )
     parser.add_argument(
         "--threshold", type=float,
@@ -306,7 +437,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # ── Parse bucket / key ────────────────────────────────────────────
+    # ── Kafka mode ────────────────────────────────────────────────────────
+    if args.kafka:
+        return run_kafka_worker()
+
+    # ── ZIP mode (Phase 2 — unchanged) ────────────────────────────────────
+    if not args.job_id:
+        print("ERROR: --job-id is required when using --zip mode", file=sys.stderr)
+        return 1
+
+    # Parse bucket / key
     zip_path: str = args.zip
     if "/" not in zip_path:
         print(f"ERROR: --zip must be <bucket>/<key>, got: {zip_path}", file=sys.stderr)
@@ -314,17 +454,17 @@ def main() -> int:
     bucket, object_key = zip_path.split("/", 1)
     job_id: str = args.job_id
 
-    # ── Config from environment ───────────────────────────────────────
+    # Config from environment
     threshold = args.threshold or float(os.getenv("SUSPICIOUS_PAIR_THRESHOLD", "0.6"))
     lsh_threshold = float(os.getenv("LSH_THRESHOLD", "0.5"))
     lsh_num_perm = int(os.getenv("LSH_NUM_PERM", "128"))
     max_file_bytes = int(os.getenv("MAX_FILE_BYTES", "500000"))
 
-    # ── Build clients ─────────────────────────────────────────────────
+    # Build clients
     minio = _build_minio_client()
     state = _build_state_manager()
 
-    # ── Health checks ─────────────────────────────────────────────────
+    # Health checks
     if not minio.health_check():
         print("ERROR: MinIO is unreachable", file=sys.stderr)
         return 1
