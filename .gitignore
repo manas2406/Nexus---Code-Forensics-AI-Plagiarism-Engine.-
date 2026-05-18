@@ -38,8 +38,7 @@ Thumbs.db
 *.tsbuildinfo
 
 # Project-specific
-# Note: Buildplan.md is intentionally tracked (force-added) despite being in gitignore previously.
-# It is now tracked. Only devstudy.md is excluded.
+Buildplan.md
 
 services/ai-worker/build
 services/ai-worker/.venv
@@ -47,4 +46,4 @@ services/hash-worker/build
 services/hash-worker/.venv
 
 # Developer study notes (personal reference — not for committing)
-devstudy.md
+devstudy.md
