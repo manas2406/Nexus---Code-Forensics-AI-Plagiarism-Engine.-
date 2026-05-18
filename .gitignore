@@ -44,3 +44,6 @@ services/ai-worker/build
 services/ai-worker/.venv
 services/hash-worker/build
 services/hash-worker/.venv
+
+# Developer study notes (personal reference — not for committing)
+devstudy.md

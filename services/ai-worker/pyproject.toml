@@ -5,24 +5,32 @@ description = "Nexus AI worker: LLM-powered forensic analysis of suspicious code
 requires-python = ">=3.11"
 
 dependencies = [
-    # Kafka consumer (C extension — matches hash-worker for consistency)
+    # Kafka consumer (confluent-kafka — C extension, fastest Python Kafka client)
     "confluent-kafka==2.4.0",
 
     # MinIO S3-compatible client
     "minio==7.2.7",
 
-    # Redis client (sync for state updates)
+    # Redis client (sync for state writes + pub/sub publish)
     "redis==5.0.4",
 
     # Async HTTP for LLM API calls (primary workload of this worker)
     "httpx==0.27.0",
+
+    # Graph algorithms for transitive closure deduplication
+    # Used in deduplicator.py to find connected components (cheating rings)
+    "networkx==3.3",
+
+    # Environment variable loading (.env support for local dev)
+    "python-dotenv==1.0.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest==8.1.0",
-    "pytest-asyncio==0.23.0",
+    "pytest>=8.1.0",
+    "pytest-asyncio>=0.23.0",
     "pytest-cov==5.0.0",
+    "pytest-mock==3.14.0",
     "mypy==1.9.0",
     "ruff==0.4.0",
 ]

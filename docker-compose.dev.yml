@@ -31,3 +31,10 @@ services:
   #   environment:
   #     LOG_LEVEL: debug
 
+  # ── AI Worker (Phase 4) ─────────────────────────────────────────────────────
+  ai-worker:
+    volumes:
+      - ./services/ai-worker:/app:ro
+    environment:
+      LOG_LEVEL: debug
+      AI_BATCH_WINDOW_SECONDS: "1.0"   # faster batching during dev iteration

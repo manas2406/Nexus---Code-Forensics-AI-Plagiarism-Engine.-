@@ -291,32 +291,33 @@ services:
   #   restart: unless-stopped
 
   # ── AI Worker ────────────────────────────────────────────────────────────────
-  # ACTIVATE IN PHASE 4 — uncomment when services/ai-worker/src/main.py exists
-  #
-  # ai-worker:
-  #   build:
-  #     context: services/ai-worker
-  #     dockerfile: Dockerfile
-  #     target: runtime
-  #   container_name: nexus-ai-worker
-  #   hostname: ai-worker
-  #   networks: [nexus-net]
-  #   depends_on:
-  #     kafka:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #     minio:
-  #       condition: service_healthy
-  #   environment:
-  #     <<: *infra-env
-  #     LLM_API_KEY: ${LLM_API_KEY}
-  #     LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
-  #     LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
-  #     LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-5}
-  #     LLM_MAX_SOURCE_CHARS: ${LLM_MAX_SOURCE_CHARS:-4000}
-  #     LOG_LEVEL: ${LOG_LEVEL:-info}
-  #   restart: unless-stopped
+  # ACTIVATED IN PHASE 4
+  ai-worker:
+    build:
+      context: services/ai-worker
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: nexus-ai-worker
+    hostname: ai-worker
+    networks: [nexus-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      <<: *infra-env
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_API_URL: ${LLM_API_URL:-https://api.openai.com/v1/chat/completions}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-5}
+      LLM_MAX_SOURCE_CHARS: ${LLM_MAX_SOURCE_CHARS:-4000}
+      AI_BATCH_WINDOW_SECONDS: ${AI_BATCH_WINDOW_SECONDS:-2.0}
+      AI_MAX_BATCH_SIZE: ${AI_MAX_BATCH_SIZE:-500}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    restart: unless-stopped
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Networks
