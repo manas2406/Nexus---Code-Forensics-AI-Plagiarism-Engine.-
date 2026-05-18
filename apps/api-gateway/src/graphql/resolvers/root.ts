@@ -91,6 +91,8 @@ export const resolvers = {
           jobId,
           bucketName:          'nexus-submissions',
           objectKey:           uploadResult.objectKey,
+          // submissionZipKey mirrors objectKey — required by hash-worker handler.py
+          submissionZipKey:    uploadResult.objectKey,
           submittedAt:         new Date().toISOString(),
           fileCount:           -1,    // Unknown until worker unzips
           similarityThreshold,

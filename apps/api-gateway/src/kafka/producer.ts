@@ -70,6 +70,8 @@ export interface JobCreatedEvent {
   jobId:               string;
   bucketName:          string;
   objectKey:           string;
+  /** Alias of objectKey — required by hash-worker handler.py (payload.get("submissionZipKey")) */
+  submissionZipKey:    string;
   submittedAt:         string;
   fileCount:           number;
   similarityThreshold: number;
