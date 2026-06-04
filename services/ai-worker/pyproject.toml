@@ -23,6 +23,8 @@ dependencies = [
 
     # Environment variable loading (.env support for local dev)
     "python-dotenv==1.0.1",
+
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
