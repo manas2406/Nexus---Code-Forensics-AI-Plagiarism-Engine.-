@@ -196,3 +196,23 @@ export const CONSUMER_GROUPS = {
 //   - ForensicResultEvent.confidence
 //   - JobCreatedEvent.similarityThreshold
 //   - comparator.py jaccard() return value
+
+// ── Phase 5 Added Types ───────────────────────────────────────────────────
+export interface SuspiciousPair {
+  pairId: string;
+  fileA: string;
+  fileB: string;
+  similarity: number;
+}
+
+export interface ForensicReport {
+  pairId: string;
+  jobId: string;
+  verdict: 'LIKELY_PLAGIARISM' | 'POSSIBLE_COINCIDENCE' | 'INCONCLUSIVE';
+  confidence: number;
+  obfuscation_techniques?: string[];
+  evidence_summary: string;
+  file_a_diff?: string;
+  file_b_diff?: string;
+  is_fallback?: boolean;
+}
