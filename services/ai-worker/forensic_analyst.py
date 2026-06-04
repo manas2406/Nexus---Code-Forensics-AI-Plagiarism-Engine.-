@@ -1,112 +1,164 @@
-# services/ai-worker/forensic_analyst.py
-# INTERFACE CONTRACT — locked Phase 4 Day 1
-#
-# Dev A owns the wrapper. Dev B implements analyze_pair().
-# Do NOT change function signatures without notifying Dev A.
-#
-# Contract summary:
-#   - analyze_pair(SuspiciousPair) -> ForensicReport
-#   - NEVER raises (fallback ForensicReport always returned on any failure)
-#   - Concurrency controlled internally via asyncio.Semaphore (LLM_MAX_CONCURRENT)
-#   - Source code strings provided by caller (Dev A fetches from MinIO before calling)
-#   - Truncation to LLM_MAX_SOURCE_CHARS applied by Dev A BEFORE passing to this function
-#
-# Dev B implements:
-#   - asyncio.Semaphore cap (LLM_MAX_CONCURRENT env var)
-#   - Exponential backoff with jitter on 429 / 5xx
-#   - JSON response parsing + markdown fence stripping
-#   - Fallback report on total LLM failure
-
-from __future__ import annotations
-
+import asyncio
+import json
 import logging
-import time
-from dataclasses import dataclass, field
-from typing import Any
+import re
+import random
+from dataclasses import dataclass
+import openai
+from openai import AsyncOpenAI
+from rate_limiter import TokenBucket
 
 logger = logging.getLogger("nexus.forensic-analyst")
 
-
 @dataclass
-class SuspiciousPair:
-    """
-    Input to analyze_pair(). Dev A constructs this from the Kafka payload + MinIO source.
-
-    Fields:
-        job_id:           Parent job identifier.
-        pair_id:          Unique pair identifier (SHA-256 prefix from hash-worker).
-        file_a_name:      Original filename (e.g., "alice.cpp").
-        file_a_source:    Raw C++ source code, pre-truncated to LLM_MAX_SOURCE_CHARS.
-        file_b_name:      Original filename (e.g., "bob.cpp").
-        file_b_source:    Raw C++ source code, pre-truncated to LLM_MAX_SOURCE_CHARS.
-        similarity_score: Jaccard similarity from the hash worker (0.0–1.0).
-    """
-
-    job_id:           str
-    pair_id:          str
-    file_a_name:      str
-    file_a_source:    str
-    file_b_name:      str
-    file_b_source:    str
-    similarity_score: float
-
+class PairInput:
+    pair_id: str
+    file_a: str           # filename
+    file_b: str           # filename
+    source_a: str         # C++ source, truncated to max_chars
+    source_b: str         # C++ source, truncated to max_chars
+    similarity: float
 
 @dataclass
 class ForensicReport:
-    """
-    Output from analyze_pair(). Dev A serializes this to MinIO JSON.
-
-    Fields:
-        pair_id:                Echoes the input pair_id (used as MinIO object name).
-        similarity_score:       Echoes the input score (for denormalization/display).
-        obfuscation_techniques: e.g. ["VARIABLE_RENAMING", "LOOP_RESTRUCTURING"].
-        evidence:               List of dicts with {"type": str, "description": str}.
-        verdict:                "LIKELY_PLAGIARISM" | "POSSIBLE_COINCIDENCE" | "INCONCLUSIVE".
-        confidence:             Model's confidence in the verdict (0.0–1.0).
-        analyst_notes:          Free-text narrative explanation.
-        raw_llm_response:       Always preserved verbatim for audit (even on fallback).
-    """
-
-    pair_id:                str
-    similarity_score:       float
+    pair_id: str
+    verdict: str          # "LIKELY_PLAGIARISM" | "POSSIBLE_COINCIDENCE" | "INCONCLUSIVE"
+    confidence: float     # 0.0–1.0
     obfuscation_techniques: list[str]
-    evidence:               list[dict[str, Any]]
-    verdict:                str    # "LIKELY_PLAGIARISM" | "POSSIBLE_COINCIDENCE" | "INCONCLUSIVE"
-    confidence:             float
-    analyst_notes:          str
-    raw_llm_response:       str
+    evidence_summary: str
+    raw_llm_response: str
+    is_fallback: bool     # True if LLM was unreachable and this is a default report
 
+class ForensicAnalyst:
+    def __init__(
+        self,
+        openai_client: AsyncOpenAI,
+        rate_limiter: TokenBucket,
+        semaphore: asyncio.Semaphore,
+        model: str = "gpt-4o",
+        temperature: float = 0.2,
+        max_tokens: int = 1000,
+        max_source_chars: int = 3000,
+        max_retries: int = 3,
+    ):
+        self.openai_client = openai_client
+        self.rate_limiter = rate_limiter
+        self.semaphore = semaphore
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.max_source_chars = max_source_chars
+        self.max_retries = max_retries
 
-async def analyze_pair(pair: SuspiciousPair) -> ForensicReport:
-    """
-    STUB — Dev B implements this function.
+    async def analyse(self, pair: PairInput) -> ForensicReport:
+        """
+        Acquire semaphore + rate limiter, call LLM, parse response.
+        On total failure: return fallback report, never raise.
+        """
+        async with self.semaphore:
+            await self.rate_limiter.acquire(1.0)
+            
+            messages = self._build_prompt(pair)
+            
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    response = await self.openai_client.chat.completions.create(
+                        model=self.model,
+                        messages=messages, # type: ignore
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    
+                    content = response.choices[0].message.content or ""
+                    return self._parse_response(content, pair.pair_id)
+                    
+                except openai.RateLimitError:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(wait)
+                except openai.APIStatusError as e:
+                    if e.status_code >= 500:
+                        wait = (2 ** attempt) + random.uniform(0, 1)
+                        await asyncio.sleep(wait)
+                    else:
+                        return self._fallback_report(pair.pair_id, f"API error {e.status_code}")
+                except Exception as e:
+                    return self._fallback_report(pair.pair_id, str(e))
+            
+            return self._fallback_report(pair.pair_id, "max retries exceeded")
 
-    Dev B's implementation must:
-    1. Acquire asyncio.Semaphore (LLM_MAX_CONCURRENT) before HTTP call
-    2. Call LLM API with system prompt + formatted C++ sources
-    3. Strip markdown fences (```json...```) from response
-    4. Parse JSON into ForensicReport fields
-    5. On ANY failure: return a fallback ForensicReport (never raise)
-    6. On 429/5xx: exponential backoff with jitter, then retry
+    def _build_prompt(self, pair: PairInput) -> list[dict[str, str]]:
+        """Build the messages array for the OpenAI call."""
+        
+        system_prompt = (
+            "You are a forensic code analyst specialising in academic plagiarism detection for C++ submissions.\n"
+            "You will be given two C++ source files and their structural similarity score.\n"
+            "Analyse whether the similarity indicates plagiarism, coincidental similarity, or is inconclusive.\n"
+            "Respond ONLY with a valid JSON object. No markdown, no explanation outside the JSON."
+        )
+        
+        user_prompt_template = (
+            "File A: {file_a}\n"
+            "File B: {file_b}\n"
+            "Structural similarity score: {similarity:.3f}\n\n"
+            "--- FILE A SOURCE ---\n"
+            "{source_a}\n\n"
+            "--- FILE B SOURCE ---\n"
+            "{source_b}\n\n"
+            "Respond with this exact JSON schema:\n"
+            "{{\n"
+            '  "verdict": "LIKELY_PLAGIARISM" | "POSSIBLE_COINCIDENCE" | "INCONCLUSIVE",\n'
+            '  "confidence": <float 0.0-1.0>,\n'
+            '  "obfuscation_techniques": [<list of strings, empty if none>],\n'
+            '  "evidence_summary": "<2-3 sentence explanation>"\n'
+            "}}"
+        )
+        
+        user_prompt = user_prompt_template.format(
+            file_a=pair.file_a,
+            file_b=pair.file_b,
+            similarity=pair.similarity,
+            source_a=pair.source_a,
+            source_b=pair.source_b,
+        )
+        
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
 
-    This stub returns INCONCLUSIVE with a note so the pipeline works end-to-end
-    during development before Dev B delivers the real implementation.
-    """
-    logger.warning(
-        "[STUB] analyze_pair called for pair=%s — Dev B has not implemented this yet. "
-        "Returning INCONCLUSIVE fallback report.",
-        pair.pair_id,
-    )
-    return ForensicReport(
-        pair_id=pair.pair_id,
-        similarity_score=pair.similarity_score,
-        obfuscation_techniques=[],
-        evidence=[],
-        verdict="INCONCLUSIVE",
-        confidence=0.0,
-        analyst_notes=(
-            "[STUB] Dev B has not yet implemented forensic_analyst.analyze_pair(). "
-            "This is a placeholder report. Replace this file with Dev B's implementation."
-        ),
-        raw_llm_response="",
-    )
+    def _parse_response(self, raw: str, pair_id: str) -> ForensicReport:
+        """
+        Parse LLM JSON response into ForensicReport.
+        Strips markdown fences if present.
+        Returns fallback report if JSON is invalid.
+        """
+        cleaned = re.sub(r'^```json\s*|^```\s*|```$', '', raw.strip(), flags=re.MULTILINE)
+        try:
+            data = json.loads(cleaned)
+            verdict = data.get('verdict', 'INCONCLUSIVE')
+            if verdict not in ('LIKELY_PLAGIARISM', 'POSSIBLE_COINCIDENCE', 'INCONCLUSIVE'):
+                verdict = 'INCONCLUSIVE'
+            
+            return ForensicReport(
+                pair_id=pair_id,
+                verdict=verdict,
+                confidence=float(data.get('confidence', 0.5)),
+                obfuscation_techniques=data.get('obfuscation_techniques', []),
+                evidence_summary=data.get('evidence_summary', ''),
+                raw_llm_response=raw,
+                is_fallback=False,
+            )
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return self._fallback_report(pair_id, f"unparseable response: {raw[:100]}")
+
+    def _fallback_report(self, pair_id: str, reason: str) -> ForensicReport:
+        """Return a safe default report when LLM is unreachable or unparseable."""
+        return ForensicReport(
+            pair_id=pair_id,
+            verdict="INCONCLUSIVE",
+            confidence=0.0,
+            obfuscation_techniques=[],
+            evidence_summary=f"Fallback generated due to error: {reason}",
+            raw_llm_response="",
+            is_fallback=True,
+        )
